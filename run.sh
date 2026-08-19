@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Wire the two halves:  DDS -> curated NDJSON -> batched HEC POST.
+#
+# The reader dying must take the shipper with it (and vice versa) so systemd restarts the
+# whole chain rather than leaving half of it running: hence pipefail + the explicit wait.
+set -uo pipefail
+cd "$(dirname "$0")"
+
+export DDS_IFACE="${DDS_IFACE:-eth0}"          # the robot's internal bus
+export ROBOT_NAME="${ROBOT_NAME:-go2}"
+export PERIOD="${PERIOD:-3.0}"
+export HEC_INDEX="${HEC_INDEX:-go2-robot-data}"
+export HEC_URL="${HEC_URL:?set HEC_URL}"
+export SPOOL_DIR="${SPOOL_DIR:-/var/tmp/robot-splunk-spool}"
+
+# Token from a file by preference: it never appears in the process list or in shell
+# history that way.
+TOKEN_FILE="${TOKEN_FILE:-$HOME/.splunk_hec_token}"
+if [ -z "${HEC_TOKEN:-}" ] && [ -r "$TOKEN_FILE" ]; then
+  HEC_TOKEN="$(cat "$TOKEN_FILE")"
+fi
+export HEC_TOKEN="${HEC_TOKEN:?set HEC_TOKEN or create $TOKEN_FILE}"
+
+exec ./telemetry_reader | python3 shipper/hec_shipper.py

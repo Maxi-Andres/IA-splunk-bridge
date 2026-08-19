@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""
+hec_shipper — reads HEC event envelopes (one JSON per line) on stdin and posts them to
+Splunk in batches, with a disk spool so a dead link becomes a delay instead of a hole.
+
+Runs on the robot next to telemetry_reader:  telemetry_reader | hec_shipper.py
+
+Standard library only, so nothing has to be installed on the robot (Python 3.8 there).
+
+Three properties that matter in the field:
+  * Every event already carries its own `time`, set when it was read off DDS. Events that
+    drain hours later still land at the correct timestamp in Splunk.
+  * The spool is bounded and drops the OLDEST batch when full. Telemetry is perishable and
+    the robot's disk is not ours to fill.
+  * A daily byte cap that stops sending. The Splunk licence is shared with other users;
+    this agent must not be able to eat it.
+"""
+import json
+import os
+import select
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.request
+
+HEC_URL = os.environ.get("HEC_URL", "")
+HEC_TOKEN = os.environ.get("HEC_TOKEN", "")
+SPOOL_DIR = os.environ.get("SPOOL_DIR", "/var/tmp/robot-splunk-spool")
+SPOOL_MB = float(os.environ.get("SPOOL_MB", "50"))
+DAILY_CAP = int(os.environ.get("DAILY_BYTE_CAP", str(150 * 1024 * 1024)))
+BATCH_N = int(os.environ.get("BATCH_N", "20"))
+BATCH_MS = float(os.environ.get("BATCH_MS", "2000"))
+VERIFY_TLS = os.environ.get("VERIFY_TLS", "0") == "1"
+TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "5"))
+
+_ctx = ssl.create_default_context()
+if not VERIFY_TLS:                      # Splunk ships a self-signed cert by default
+    _ctx.check_hostname = False
+    _ctx.verify_mode = ssl.CERT_NONE
+
+
+def log(msg):
+    print(f"[shipper] {msg}", file=sys.stderr, flush=True)
+
+
+class Spool:
+    """Bounded directory of pending batch files, oldest-first, dropped oldest-first."""
+
+    def __init__(self, path, max_bytes):
+        self.path = path
+        self.max_bytes = max_bytes
+        self.seq = 0
+        os.makedirs(path, exist_ok=True)
+
+    def files(self):
+        return sorted(f for f in os.listdir(self.path) if f.endswith(".ndjson"))
+
+    def size(self):
+        return sum(os.path.getsize(os.path.join(self.path, f)) for f in self.files())
+
+    def put(self, body):
+        self.seq += 1
+        name = f"{int(time.time()*1000):015d}-{self.seq:05d}.ndjson"
+        with open(os.path.join(self.path, name), "wb") as fh:
+            fh.write(body)
+        dropped = 0
+        while self.size() > self.max_bytes:
+            oldest = self.files()
+            if len(oldest) <= 1:
+                break                    # never drop the batch we just wrote
+            os.unlink(os.path.join(self.path, oldest[0]))
+            dropped += 1
+        if dropped:
+            log(f"spool full ({self.max_bytes} B): dropped {dropped} oldest batch(es)")
+
+    def pop_oldest(self):
+        fs = self.files()
+        if not fs:
+            return None, None
+        full = os.path.join(self.path, fs[0])
+        with open(full, "rb") as fh:
+            return full, fh.read()
+
+    def drop(self, full):
+        try:
+            os.unlink(full)
+        except FileNotFoundError:
+            pass
+
+
+class Sender:
+    def __init__(self):
+        self.sent_bytes = 0
+        self.day = time.gmtime().tm_yday
+        self.capped = False
+        self.backoff = 1.0
+
+    def _roll_day(self):
+        today = time.gmtime().tm_yday
+        if today != self.day:
+            log(f"new UTC day: byte counter reset (was {self.sent_bytes} B)")
+            self.day, self.sent_bytes, self.capped = today, 0, False
+
+    def post(self, body):
+        """True if Splunk accepted it. False means: spool it and retry later."""
+        self._roll_day()
+        if self.sent_bytes + len(body) > DAILY_CAP:
+            if not self.capped:
+                log(f"DAILY CAP reached ({DAILY_CAP} B) — dropping until UTC midnight")
+                self.capped = True
+            return True                  # deliberately not spooled: the cap is a stop
+        req = urllib.request.Request(
+            HEC_URL, data=body,
+            headers={"Authorization": f"Splunk {HEC_TOKEN}",
+                     "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT, context=_ctx) as r:
+                r.read()
+            self.sent_bytes += len(body)
+            self.backoff = 1.0
+            return True
+        except urllib.error.HTTPError as e:
+            detail = e.read()[:200].decode("utf-8", "replace")
+            # 4xx will never succeed on retry (bad token, bad index): do not spool it.
+            if 400 <= e.code < 500:
+                log(f"HTTP {e.code} — NOT retrying: {detail}")
+                return True
+            log(f"HTTP {e.code}: {detail}")
+        except Exception as e:
+            log(f"post failed: {e}")
+        self.backoff = min(self.backoff * 2, 60.0)
+        return False
+
+
+def main():
+    if not (HEC_URL and HEC_TOKEN):
+        sys.exit("HEC_URL and HEC_TOKEN are required")
+    spool = Spool(SPOOL_DIR, int(SPOOL_MB * 1024 * 1024))
+    sender = Sender()
+    log(f"up: url={HEC_URL} spool={SPOOL_DIR} cap={DAILY_CAP}B")
+
+    batch, last_flush, next_drain = [], time.time(), 0.0
+
+    def flush():
+        nonlocal batch
+        if not batch:
+            return
+        body = "".join(batch).encode()
+        batch = []
+        if not sender.post(body):
+            spool.put(body)
+
+    def drain_one():
+        """One spooled batch per pass, so intake is never blocked by a big backlog."""
+        full, body = spool.pop_oldest()
+        if body is None:
+            return None
+        if sender.post(body):
+            spool.drop(full)
+            return True
+        return False
+
+    while True:
+        # select() rather than a blocking readline(): the loop MUST keep turning when no
+        # data arrives, or a spool backlog never drains while DDS is silent (robot just
+        # booted, link was down) — which is precisely when there is a backlog to drain.
+        ready, _, _ = select.select([sys.stdin], [], [], 0.5)
+        if ready:
+            line = sys.stdin.readline()
+            if not line:                 # reader exited
+                flush()
+                for _ in range(200):     # bounded best-effort drain on the way out
+                    if drain_one() is not True:
+                        break
+                log("stdin closed, exiting")
+                return
+            line = line.strip()
+            if line:
+                batch.append(line)
+
+        now = time.time()
+        if batch and (len(batch) >= BATCH_N or (now - last_flush) * 1000 >= BATCH_MS):
+            flush()
+            last_flush = now
+
+        if now >= next_drain:
+            r = drain_one()
+            if r is True:
+                next_drain = 0.0          # keep draining while it works
+            elif r is False:
+                next_drain = now + sender.backoff
+            else:
+                next_drain = now + 1.0
+
+
+if __name__ == "__main__":
+    main()

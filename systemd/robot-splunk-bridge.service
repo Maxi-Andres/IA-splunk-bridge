@@ -1,0 +1,30 @@
+# Telemetry agent for the robot's own Jetson.
+#   sudo cp systemd/robot-splunk-bridge.service /etc/systemd/system/
+#   sudo systemctl enable --now robot-splunk-bridge
+[Unit]
+Description=Robot telemetry -> Splunk HEC
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=unitree
+WorkingDirectory=/home/unitree/robot-splunk-bridge
+Environment=HEC_URL=https://192.168.20.200:8088/services/collector/event
+Environment=HEC_INDEX=go2-robot-data
+Environment=ROBOT_NAME=go2
+Environment=DDS_IFACE=eth0
+Environment=PERIOD=3.0
+ExecStart=/home/unitree/robot-splunk-bridge/run.sh
+Restart=always
+RestartSec=5
+# Never let the agent compete with the robot's control stack. It only subscribes; it
+# publishes to no command topic, so throttling it cannot affect the robot's behaviour.
+MemoryMax=256M
+CPUQuota=25%
+Nice=10
+# A crash loop must not hammer the robot either.
+StartLimitBurst=5
+StartLimitIntervalSec=120
+
+[Install]
+WantedBy=multi-user.target

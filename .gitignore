@@ -1,0 +1,3 @@
+telemetry_reader
+*.o
+__pycache__/
