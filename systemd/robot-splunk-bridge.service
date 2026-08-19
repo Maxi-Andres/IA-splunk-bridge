@@ -5,6 +5,10 @@
 Description=Robot telemetry -> Splunk HEC
 After=network-online.target
 Wants=network-online.target
+# These belong in [Unit], NOT [Service]: systemd 245 warns "Unknown key name" and ignores
+# them if placed under [Service], leaving the crash-loop guard silently disabled.
+StartLimitBurst=5
+StartLimitIntervalSec=120
 
 [Service]
 User=unitree
@@ -22,9 +26,5 @@ RestartSec=5
 MemoryMax=256M
 CPUQuota=25%
 Nice=10
-# A crash loop must not hammer the robot either.
-StartLimitBurst=5
-StartLimitIntervalSec=120
-
 [Install]
 WantedBy=multi-user.target
