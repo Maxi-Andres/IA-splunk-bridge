@@ -17,7 +17,9 @@ export SPOOL_DIR="${SPOOL_DIR:-/var/tmp/robot-splunk-spool}"
 # history that way.
 TOKEN_FILE="${TOKEN_FILE:-$HOME/.splunk_hec_token}"
 if [ -z "${HEC_TOKEN:-}" ] && [ -r "$TOKEN_FILE" ]; then
-  HEC_TOKEN="$(cat "$TOKEN_FILE")"
+  # tr, not plain cat: a trailing newline or a CR from a pasted value would end up in the
+  # Authorization header and fail with a message that blames the header, not the file.
+  HEC_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
 fi
 export HEC_TOKEN="${HEC_TOKEN:?set HEC_TOKEN or create $TOKEN_FILE}"
 

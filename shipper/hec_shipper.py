@@ -136,6 +136,12 @@ class Sender:
 def main():
     if not (HEC_URL and HEC_TOKEN):
         sys.exit("HEC_URL and HEC_TOKEN are required")
+    # A token with whitespace in it is always a bad token file, but urllib reports it as
+    # "Invalid header value", which sends you looking in the wrong place.
+    if HEC_TOKEN != HEC_TOKEN.strip() or any(c.isspace() for c in HEC_TOKEN):
+        sys.exit(f"HEC_TOKEN contains whitespace ({HEC_TOKEN!r}) — the token file is "
+                 f"probably corrupt. Rewrite it with:\n"
+                 f"  printf '%s' 'YOUR-TOKEN' > ~/.splunk_hec_token")
     spool = Spool(SPOOL_DIR, int(SPOOL_MB * 1024 * 1024))
     sender = Sender()
     log(f"up: url={HEC_URL} spool={SPOOL_DIR} cap={DAILY_CAP}B")
@@ -195,4 +201,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        log("interrupted")

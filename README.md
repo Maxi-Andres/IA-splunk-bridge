@@ -38,6 +38,32 @@ rt/lf/sport…   ─┘   curated fields, decimated        batch + disk spool
 - **`poc/telemetry_poc.py`** — throwaway Python version that runs in the ROS2 devcontainer
   on a workstation. Used to validate the data contract; not for the robot.
 
+## Deploy to the robot
+
+Clone both repos on the robot; the SDK comes straight from Unitree's upstream (this project
+does not patch it) and the robot has internet, so nothing needs copying from a workstation.
+
+```bash
+ssh unitree@<robot-jetson>
+git clone https://github.com/unitreerobotics/unitree_sdk2.git ~/unitree_sdk2
+git clone <this-repo> ~/robot-splunk-bridge
+cd ~/robot-splunk-bridge && ./build.sh
+```
+
+Updating later:
+
+```bash
+git pull && ./build.sh && sudo systemctl restart robot-splunk-bridge
+```
+
+`./build.sh` is **not** optional after a pull: the binary is gitignored, so a pull brings
+new source without rebuilding it.
+
+The token lives in `~/.splunk_hec_token`, outside the repo — a pull never overwrites it and
+a push never leaks it.
+
+Step-by-step with success criteria for each stage: `SplunkCode/IMPLEMENTACION.md`, Etapa D.
+
 ## Build
 
 ```bash
