@@ -61,6 +61,36 @@ def audit(addr, verb, detail, result):
         log(f"audit write failed: {exc}")
 
 
+def video_status():
+    """What the video publisher is ACTUALLY configured with, right now.
+
+    Read from /proc/<pid>/environ of the running run-video.sh — not from video.env — so it
+    reports what is in effect rather than what a file says. Someone editing the file without
+    restarting the service would otherwise make this lie, and the whole point is that the
+    app can trust it instead of hardcoding an address.
+    """
+    try:
+        pids = subprocess.run(["pgrep", "-f", "run-video.sh"],
+                              capture_output=True, text=True, timeout=3).stdout.split()
+        if not pids:
+            return {"running": False}
+        with open(f"/proc/{pids[0]}/environ", "rb") as fh:
+            env = dict(
+                kv.split("=", 1) for kv in fh.read().decode("utf-8", "replace").split("\0")
+                if "=" in kv)
+        return {
+            "running": True,
+            "publish_host": env.get("PUBLISH_HOST", ""),
+            "proto": env.get("PROTO", ""),
+            "stream": env.get("STREAM", ""),
+            "port": env.get("PUBLISH_PORT", "1935" if env.get("PROTO") == "rtmp" else ""),
+            "bitrate": env.get("BITRATE", ""),
+            "maxfps": env.get("MAXFPS", ""),
+        }
+    except Exception as exc:                     # never let this break the relay
+        return {"running": False, "error": str(exc)}
+
+
 class Sender:
     """Owns the long-lived command_sender child. One DDS participant, created once."""
 
@@ -147,7 +177,9 @@ class Handler(BaseHTTPRequestHandler):
         proc = self.server.sender.proc
         self._json(200, {"ok": True,
                          "sender_alive": bool(proc and proc.poll() is None),
-                         "verbs": sorted(VERBS | {"move"})})
+                         "verbs": sorted(VERBS | {"move"}),
+                         # Reported by the robot so the app never has to hardcode it.
+                         "video": video_status()})
 
     def do_POST(self):
         if self.path.split("?")[0] != "/cmd":
