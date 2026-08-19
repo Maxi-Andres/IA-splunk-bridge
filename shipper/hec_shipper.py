@@ -24,6 +24,9 @@ import time
 import urllib.error
 import urllib.request
 
+ROBOT = os.environ.get("ROBOT_NAME", "go2")
+INDEX = os.environ.get("HEC_INDEX", "")
+SELF_HEALTH_S = float(os.environ.get("SELF_HEALTH_S", "30"))
 HEC_URL = os.environ.get("HEC_URL", "")
 HEC_TOKEN = os.environ.get("HEC_TOKEN", "")
 SPOOL_DIR = os.environ.get("SPOOL_DIR", "/var/tmp/robot-splunk-spool")
@@ -147,6 +150,21 @@ def main():
     log(f"up: url={HEC_URL} spool={SPOOL_DIR} cap={DAILY_CAP}B")
 
     batch, last_flush, next_drain = [], time.time(), 0.0
+    next_self = time.time() + SELF_HEALTH_S
+
+    def self_health():
+        """Own telemetry: the reader cannot report these — the counters live here."""
+        ev = {"time": round(time.time(), 3), "sourcetype": "robot:shipper",
+              "host": ROBOT,
+              "event": {"sent_bytes_today": sender.sent_bytes,
+                        "byte_cap": DAILY_CAP,
+                        "capped": sender.capped,
+                        "spool_files": len(spool.files()),
+                        "spool_bytes": spool.size(),
+                        "robot": ROBOT}}
+        if INDEX:
+            ev["index"] = INDEX
+        batch.append(json.dumps(ev, separators=(",", ":")))
 
     def flush():
         nonlocal batch
@@ -186,6 +204,10 @@ def main():
                 batch.append(line)
 
         now = time.time()
+        if now >= next_self:
+            next_self = now + SELF_HEALTH_S
+            self_health()
+
         if batch and (len(batch) >= BATCH_N or (now - last_flush) * 1000 >= BATCH_MS):
             flush()
             last_flush = now

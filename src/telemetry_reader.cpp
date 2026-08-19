@@ -266,7 +266,7 @@ int main() {
 
     double next_data = now_s() + g_period;
     double next_health = now_s() + g_health_period;
-    bool alive = false;
+    int alive = -1;   // -1 = not determined yet
 
     while (true) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -306,16 +306,18 @@ int main() {
             o.raw("robot", "\"" + g_robot + "\"");
             emit("robot:health", "{" + o.s + "}");
 
-            // A gap becomes a datum instead of a silent hole in the dashboard.
-            if (now_alive != alive) {
+            // A gap becomes a datum instead of a silent hole in the dashboard. The very
+            // first determination is not a transition, though: emitting it would log a
+            // fake "link came up" on every restart.
+            if (alive != -1 && now_alive != (alive == 1)) {
                 Obj e;
                 e.raw("kind", "\"dds_link\"");
-                e.i("prev", alive ? 1 : 0);
+                e.i("prev", alive);
                 e.i("curr", now_alive ? 1 : 0);
                 e.raw("robot", "\"" + g_robot + "\"");
                 emit("robot:event", "{" + e.s + "}");
-                alive = now_alive;
             }
+            alive = now_alive ? 1 : 0;
         }
     }
 }
