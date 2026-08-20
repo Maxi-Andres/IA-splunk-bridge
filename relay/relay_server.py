@@ -61,6 +61,55 @@ def audit(addr, verb, detail, result):
         log(f"audit write failed: {exc}")
 
 
+def _proc_env(pattern):
+    """Environment of the first process matching `pattern`, or {}.
+
+    Read from /proc so what is reported is what the RUNNING process uses, not what a config
+    file currently says — those diverge the moment someone edits a file without restarting.
+    """
+    try:
+        pids = subprocess.run(["pgrep", "-f", pattern],
+                              capture_output=True, text=True, timeout=3).stdout.split()
+        if not pids:
+            return {}
+        with open(f"/proc/{pids[0]}/environ", "rb") as fh:
+            return dict(
+                kv.split("=", 1) for kv in fh.read().decode("utf-8", "replace").split("\0")
+                if "=" in kv)
+    except Exception:
+        return {}
+
+
+def telemetry_status():
+    """Where the robot ships telemetry to. Configured ON the robot, so the app can only
+    read it — which is exactly why it is reported here instead of being guessed."""
+    env = _proc_env("hec_shipper")
+    if not env:
+        return {"running": False}
+    url = env.get("HEC_URL", "")
+    return {
+        "running": True,
+        "hec_url": url,
+        "index": env.get("HEC_INDEX", ""),
+        "robot_name": env.get("ROBOT_NAME", ""),
+        "period_s": env.get("PERIOD", ""),
+        "daily_byte_cap": env.get("DAILY_BYTE_CAP", ""),
+    }
+
+
+def limits_status():
+    """The safety envelope this relay enforces. Read-only from the app on purpose: the
+    clamps and the dead-man window are the robot's own guarantees, not the caller's."""
+    return {
+        "max_vx": os.environ.get("MAX_VX", "0.6"),
+        "max_vy": os.environ.get("MAX_VY", "0.4"),
+        "max_vyaw": os.environ.get("MAX_VYAW", "1.0"),
+        "deadman_ms": os.environ.get("DEADMAN_MS", "1500"),
+        "max_per_sec": str(MAX_PER_SEC),
+        "dds_iface": os.environ.get("DDS_IFACE", "eth0"),
+    }
+
+
 def video_status():
     """What the video publisher is ACTUALLY configured with, right now.
 
@@ -70,14 +119,9 @@ def video_status():
     app can trust it instead of hardcoding an address.
     """
     try:
-        pids = subprocess.run(["pgrep", "-f", "run-video.sh"],
-                              capture_output=True, text=True, timeout=3).stdout.split()
-        if not pids:
+        env = _proc_env("run-video.sh")
+        if not env:
             return {"running": False}
-        with open(f"/proc/{pids[0]}/environ", "rb") as fh:
-            env = dict(
-                kv.split("=", 1) for kv in fh.read().decode("utf-8", "replace").split("\0")
-                if "=" in kv)
         return {
             "running": True,
             "publish_host": env.get("PUBLISH_HOST", ""),
@@ -178,8 +222,11 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"ok": True,
                          "sender_alive": bool(proc and proc.poll() is None),
                          "verbs": sorted(VERBS | {"move"}),
-                         # Reported by the robot so the app never has to hardcode it.
-                         "video": video_status()})
+                         # Everything below is configured ON THE ROBOT: the app can only
+                         # read it, so the robot reports it instead of the app guessing.
+                         "video": video_status(),
+                         "telemetry": telemetry_status(),
+                         "limits": limits_status()})
 
     def do_POST(self):
         if self.path.split("?")[0] != "/cmd":
